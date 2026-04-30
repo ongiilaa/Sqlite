@@ -1,14 +1,14 @@
 import 'package:flutter/material.dart';
-import 'package:sqflite_common_ffi/sqflite_ffi.dart';
-import 'package:path/path.dart' as path;
-import 'dart:io';
+import 'package:sqflite/sqflite.dart';
+import 'package:path/path.dart' as p;
+import 'package:sqflite_common_ffi_web/sqflite_ffi_web.dart';
+import 'package:flutter/foundation.dart';
 
 void main() {
-  WidgetsFlutterBinding.ensureInitialized();
-
-  if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
-    sqfliteFfiInit();
-    databaseFactory = databaseFactoryFfi;
+  // Initialize FFI for web support without a shared worker.
+  // This avoids the need to ship the worker binary file.
+  if (kIsWeb) {
+    databaseFactory = databaseFactoryFfiWebNoWebWorker;
   }
 
   runApp(const MainApp());
@@ -19,9 +19,41 @@ class MainApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return const MaterialApp(home: ListUserDataPage());
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      title: 'Flutter SQLite Demo',
+      theme: ThemeData(primarySwatch: Colors.blue),
+      home: const ListUserDataPage(),
+    );
   }
 }
+
+
+class UserModel {
+  int? id;
+  String nama;
+  int umur;
+
+  UserModel({this.id, required this.nama, required this.umur});
+
+  
+  factory UserModel.fromJson(Map<String, dynamic> json) {
+    return UserModel(
+      id: json["id"],
+      nama: json["nama"],
+      umur: json["umur"],
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      "id": id,
+      "nama": nama,
+      "umur": umur,
+    };
+  }
+}
+
 
 class DatabaseHelper {
   static Database? _database;
@@ -33,65 +65,61 @@ class DatabaseHelper {
   }
 
   static Future<Database> _initDB() async {
-    String dbPath = path.join(await getDatabasesPath(), 'user_data.db');
+    String path;
+    if (kIsWeb) {
+      path = 'user_db.db';
+    } else {
+      path = p.join(await getDatabasesPath(), "user_db.db");
+    }
+    print("Initializing database at path: $path");
+
     return await openDatabase(
-      dbPath,
+      path,
       version: 1,
-      onCreate: (db, version) async {
-        return db.execute('''
-          CREATE TABLE users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            nama TEXT,
-            umur INTEGER
-          )
-        ''');
+      onCreate: (db, version) {
+        print("Creating table users");
+        return db.execute(
+            "CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, nama TEXT, umur INTEGER)");
       },
     );
   }
 
-  static Future<int> insertData(UserModel userModel) async {
+
+  static Future<int> insertData(UserModel user) async {
     final db = await database;
+    print("Inserting into database: ${user.nama}");
     return await db.insert(
-      'users',
-      userModel.toJson(),
+      "users",
+      user.toJson(),
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
   }
 
+
   static Future<List<UserModel>> getData() async {
     final db = await database;
-    List<Map<String, Object?>> result = await db.query('users');
+    final List<Map<String, dynamic>> result = await db.query("users");
+    print("Queried ${result.length} users from database");
     return result.map((userMap) => UserModel.fromJson(userMap)).toList();
   }
 
+
   static Future<int> updateData(int id, UserModel userModel) async {
     final db = await database;
-    var user = userModel.toJson()..remove('id');
-    return await db.update('users', user, where: 'id = ?', whereArgs: [id]);
+    var data = userModel.toJson();
+    data.remove('id'); // Menghapus ID agar tidak terjadi konflik saat update
+
+    return await db.update("users", data, where: "id = ?", whereArgs: [id]);
   }
 
+  
   static Future<int> deleteData(int id) async {
     final db = await database;
-    return await db.delete('users', where: 'id = ?', whereArgs: [id]);
+    return await db.delete("users", where: "id = ?", whereArgs: [id]);
   }
 }
 
-class UserModel {
-  int? id;
-  String nama = '';
-  int umur = 0;
-
-  UserModel({this.id, required this.nama, required this.umur});
-
-  factory UserModel.fromJson(Map<String, dynamic> json) {
-    return UserModel(id: json['id'], nama: json['nama'], umur: json['umur']);
-  }
-
-  Map<String, dynamic> toJson() {
-    return {'id': id, 'nama': nama, 'umur': umur};
-  }
-}
-
+// --- UI PAGE ---
 class ListUserDataPage extends StatefulWidget {
   const ListUserDataPage({super.key});
 
@@ -100,124 +128,66 @@ class ListUserDataPage extends StatefulWidget {
 }
 
 class _ListUserDataPageState extends State<ListUserDataPage> {
-  final TextEditingController _namaCtrl = TextEditingController();
+  final TextEditingController _nameCtrl = TextEditingController();
   final TextEditingController _umurCtrl = TextEditingController();
 
   List<UserModel> userList = [];
-  bool _isLoading = false;
 
   @override
   void initState() {
     super.initState();
-    _reloadData();
+    _reloadData(); 
   }
 
-  @override
-  void dispose() {
-    _namaCtrl.dispose();
-    _umurCtrl.dispose();
-    super.dispose();
-  }
 
-  Future<void> _reloadData() async {
-    if (!mounted) return;
-    setState(() => _isLoading = true);
+  void _reloadData() async {
     try {
       var users = await DatabaseHelper.getData();
-      if (!mounted) return;
+      print("Loaded users: ${users.length}");
       setState(() {
         userList = users;
-        _isLoading = false;
       });
     } catch (e) {
-      if (mounted) {
-        setState(() => _isLoading = false);
-        _showSnackBar('Error: ${e.toString()}');
-      }
+      print("Error loading data: $e");
     }
   }
 
-  void _showSnackBar(String message) {
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text(message)));
-  }
 
   void _form(int? id) {
     if (id != null) {
       var user = userList.firstWhere((data) => data.id == id);
-      _namaCtrl.text = user.nama;
+      _nameCtrl.text = user.nama;
       _umurCtrl.text = user.umur.toString();
     } else {
-      _namaCtrl.clear();
+      _nameCtrl.clear();
       _umurCtrl.clear();
     }
 
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
-      builder: (ctx) => Padding(
+      builder: (context) => Padding(
         padding: EdgeInsets.fromLTRB(
-          20,
-          20,
-          20,
-          MediaQuery.of(ctx).viewInsets.bottom + 20,
-        ),
+            20, 20, 20, MediaQuery.of(context).viewInsets.bottom + 50),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text(
-              id == null ? 'Tambah Data Pengguna' : 'Edit Data Pengguna',
-              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 20),
             TextField(
-              controller: _namaCtrl,
-              decoration: InputDecoration(
-                hintText: "Nama",
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(8),
-                ),
-              ),
-            ),
-            const SizedBox(height: 12),
+                controller: _nameCtrl,
+                decoration: const InputDecoration(hintText: "Nama")),
             TextField(
               controller: _umurCtrl,
-              decoration: InputDecoration(
-                hintText: "Umur",
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(8),
-                ),
-              ),
+              decoration: const InputDecoration(hintText: "Umur"),
               keyboardType: TextInputType.number,
             ),
             const SizedBox(height: 20),
-            SizedBox(
-              width: double.infinity,
-              child: ElevatedButton(
-                onPressed: () async {
-                  final nama = _namaCtrl.text.trim();
-                  final umur = int.tryParse(_umurCtrl.text) ?? 0;
-                  if (nama.isEmpty) {
-                    _showSnackBar('Nama tidak boleh kosong');
-                    return;
-                  }
-                  if (umur <= 0) {
-                    _showSnackBar('Umur harus lebih dari 0');
-                    return;
-                  }
-                  await _save(id, nama, umur);
-                  if (ctx.mounted) {
-                    Navigator.pop(ctx);
-                    _showSnackBar(
-                      id == null
-                          ? 'Data berhasil ditambah'
-                          : 'Data berhasil diupdate',
-                    );
-                  }
-                },
-                child: Text(id == null ? 'Tambah' : 'Perbarui'),
-              ),
+            ElevatedButton(
+              onPressed: () {
+                if (_nameCtrl.text.isNotEmpty && _umurCtrl.text.isNotEmpty) {
+                  _save(id, _nameCtrl.text, int.parse(_umurCtrl.text));
+                }
+              },
+              child: Text(id == null ? "Tambah" : "Perbaharui"),
             ),
           ],
         ),
@@ -225,44 +195,57 @@ class _ListUserDataPageState extends State<ListUserDataPage> {
     );
   }
 
-  Future<void> _save(int? id, String nama, int umur) async {
+  // Fungsi Simpan (Insert atau Update)
+  void _save(int? id, String nama, int umur) async {
     try {
-      var newUser = UserModel(nama: nama, umur: umur);
       if (id != null) {
-        await DatabaseHelper.updateData(id, newUser);
+        await DatabaseHelper.updateData(id, UserModel(nama: nama, umur: umur));
+        print("Data updated: $nama, $umur");
       } else {
-        await DatabaseHelper.insertData(newUser);
+        await DatabaseHelper.insertData(UserModel(nama: nama, umur: umur));
+        print("Data inserted: $nama, $umur");
       }
-      await _reloadData();
+
+      _reloadData(); // Refresh list di layar utama
+      if (mounted) Navigator.pop(context); // Tutup Bottom Sheet
     } catch (e) {
-      _showSnackBar('Gagal menyimpan data: ${e.toString()}');
+      print("Error saving data: $e");
+      // Show error dialog
+      showDialog(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text("Error"),
+          content: Text("Failed to save data: $e"),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text("OK"),
+            ),
+          ],
+        ),
+      );
     }
   }
 
+  // Fungsi Hapus dengan Dialog Konfirmasi
   void _delete(int id) {
     showDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Konfirmasi Hapus'),
-        content: const Text('Apakah anda yakin ingin menghapus data ini?'),
+      builder: (context) => AlertDialog(
+        title: const Text("Konfirmasi Hapus"),
+        content: const Text("Apakah anda yakin ingin menghapus data ini?"),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Batal'),
+            onPressed: () => Navigator.pop(context),
+            child: const Text("Batal"),
           ),
           TextButton(
             onPressed: () async {
-              try {
-                await DatabaseHelper.deleteData(id);
-                if (ctx.mounted) Navigator.pop(ctx);
-                await _reloadData();
-                _showSnackBar('Data berhasil dihapus');
-              } catch (e) {
-                if (ctx.mounted) Navigator.pop(ctx);
-                _showSnackBar('Gagal menghapus: ${e.toString()}');
-              }
+              await DatabaseHelper.deleteData(id);
+              _reloadData();
+              if (mounted) Navigator.pop(context); // Tutup Dialog
             },
-            child: const Text('Hapus'),
+            child: const Text("Hapus"),
           ),
         ],
       ),
@@ -272,52 +255,33 @@ class _ListUserDataPageState extends State<ListUserDataPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Data Pengguna'), centerTitle: true),
-      body: _isLoading
-          ? const Center(child: CircularProgressIndicator())
-          : userList.isEmpty
-          ? const Center(
-              child: Text(
-                'Belum ada data\nTambahkan dengan tombol + di bawah',
-                textAlign: TextAlign.center,
-              ),
-            )
+      appBar: AppBar(
+        title: const Text("User List"),
+      ),
+      body: userList.isEmpty
+          ? const Center(child: Text("Data kosong. Klik + untuk menambah."))
           : ListView.builder(
               itemCount: userList.length,
-              itemBuilder: (cxt, i) {
-                return Card(
-                  margin: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 8,
-                  ),
-                  child: ListTile(
-                    title: Text(
-                      userList[i].nama,
-                      style: const TextStyle(fontWeight: FontWeight.bold),
+              itemBuilder: (context, i) => ListTile(
+                title: Text(userList[i].nama),
+                subtitle: Text("Umur: ${userList[i].umur} tahun"),
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      icon: const Icon(Icons.edit, color: Colors.blue),
+                      onPressed: () => _form(userList[i].id),
                     ),
-                    subtitle: Text('Umur: ${userList[i].umur} tahun'),
-                    trailing: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        IconButton(
-                          icon: const Icon(Icons.edit, color: Colors.blue),
-                          onPressed: () => _form(userList[i].id),
-                          tooltip: 'Edit',
-                        ),
-                        IconButton(
-                          icon: const Icon(Icons.delete, color: Colors.red),
-                          onPressed: () => _delete(userList[i].id!),
-                          tooltip: 'Hapus',
-                        ),
-                      ],
+                    IconButton(
+                      icon: const Icon(Icons.delete, color: Colors.red),
+                      onPressed: () => _delete(userList[i].id!),
                     ),
-                  ),
-                );
-              },
+                  ],
+                ),
+              ),
             ),
       floatingActionButton: FloatingActionButton(
         onPressed: () => _form(null),
-        tooltip: 'Tambah Data',
         child: const Icon(Icons.add),
       ),
     );
